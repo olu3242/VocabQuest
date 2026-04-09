@@ -9,7 +9,6 @@ import Button from '../../components/common/Button';
 import EmptyState from '../../components/common/EmptyState';
 import XPPopup from '../../components/gamification/XPPopup';
 import { ROUTES } from '../../constants/routes.constants';
-import { GradeBand } from '../../constants/worlds.constants';
 
 export default function SentenceBuilderPage() {
   const { wordId } = useParams<{ wordId: string }>();

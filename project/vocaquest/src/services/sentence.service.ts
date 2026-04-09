@@ -112,7 +112,7 @@ export async function scoreSentenceMock(
 }
 
 export async function scoreSayItBetterMock(
-  improvedSentence: string,
+  _improvedSentence: string,
   targetWord: string
 ): Promise<SayItBetterResult> {
   await new Promise(r => setTimeout(r, 800 + Math.random() * 600));

@@ -15,6 +15,8 @@ export function usePronunciation(targetWord: string) {
   const [attemptCount, setAttemptCount] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const recognizerRef = useRef<SpeechRecognition | null>(null);
+  // Use a ref to track attempt count inside callbacks without stale closure issues
+  const attemptCountRef = useRef(0);
 
   const startRecording = useCallback(() => {
     const recognizer = createSpeechRecognizer();
@@ -34,7 +36,8 @@ export function usePronunciation(targetWord: string) {
       setState('processing');
       const recognized = event.results[0][0].transcript;
       const confidence = event.results[0][0].confidence;
-      const attempt = attemptCount + 1;
+      attemptCountRef.current += 1;
+      const attempt = attemptCountRef.current;
       setAttemptCount(attempt);
 
       const scored = scorePronunciation(recognized, targetWord, confidence, attempt);
@@ -54,7 +57,7 @@ export function usePronunciation(targetWord: string) {
     };
 
     recognizer.start();
-  }, [targetWord, attemptCount]);
+  }, [targetWord]); // attemptCount removed — tracked via ref to avoid stale closure
 
   const stopRecording = useCallback(() => {
     recognizerRef.current?.stop();

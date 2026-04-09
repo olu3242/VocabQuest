@@ -1,7 +1,7 @@
 // src/pages/student/DailyQuestPage.tsx
 
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle2, Circle, ChevronRight } from 'lucide-react';
+import { CheckCircle2, ChevronRight } from 'lucide-react';
 import { useDailyQuest } from '../../hooks/useDailyQuest';
 import LoadingSkeleton from '../../components/common/LoadingSkeleton';
 import EmptyState from '../../components/common/EmptyState';

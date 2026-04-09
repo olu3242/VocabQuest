@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '../store/authStore';
-import { fetchTodaysQuestMock, markQuestWordStep, completeQuest } from '../services/quest.service';
+import { fetchTodaysQuestMock, completeQuest } from '../services/quest.service';
 import { getMockWordById } from '../data/mockWords';
 import { GradeBand } from '../constants/worlds.constants';
 
@@ -29,6 +29,9 @@ export function useDailyQuest() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dailyQuest', user?.id] });
       queryClient.invalidateQueries({ queryKey: ['studentGameState', user?.id] });
+    },
+    onError: (error) => {
+      console.error('[useDailyQuest] Failed to complete quest:', error);
     },
   });
 

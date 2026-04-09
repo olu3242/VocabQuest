@@ -17,7 +17,7 @@ export default function PronunciationChallengePage() {
   const [xpAmount, setXpAmount] = useState(0);
 
   const word = wordId ? getMockWordById(wordId) : undefined;
-  const { state, result, startRecording, reset, isRecording, isDone, isError, errorMessage, canRetry } =
+  const { state, result, startRecording, reset, isRecording, isDone, isError, errorMessage } =
     usePronunciation(word?.word ?? '');
 
   if (!word) return <EmptyState emoji="🔍" title="Word not found" />;
