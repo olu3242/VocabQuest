@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-indigo-primary: #4F46E5;
+    --color-teal-accent: #0D9488;
+    --color-amber-xp: #F59E0B;
+    --color-background: #F8FAFC;
+    --color-surface: #FFFFFF;
+    --color-dark-card: #1E1B4B;
+    --color-text-primary: #1F2937;
+    --color-text-secondary: #6B7280;
+    --color-text-muted: #9CA3AF;
+
+    --world-word-garden: #10B981;
+    --world-sentence-city: #3B82F6;
+    --world-expression-academy: #8B5CF6;
+    --world-fluency-arena: #EF4444;
+  }
+
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: var(--color-background);
+    color: var(--color-text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #D1D5DB;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #9CA3AF;
+  }
+}
+
+@layer components {
+  /* XP Bar progress variable injection */
+  .xp-bar-fill {
+    width: var(--xp-width, 0%);
+    transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  /* Grade band world badge colors */
+  .world-badge-k2 { background-color: var(--world-word-garden); }
+  .world-badge-35 { background-color: var(--world-sentence-city); }
+  .world-badge-68 { background-color: var(--world-expression-academy); }
+  .world-badge-912 { background-color: var(--world-fluency-arena); }
+
+  /* Pronunciation mic pulse ring */
+  .mic-pulse {
+    animation: micPulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes micPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.4); }
+    50% { box-shadow: 0 0 0 16px rgba(79, 70, 229, 0); }
+  }
+}
