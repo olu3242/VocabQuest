@@ -2,10 +2,14 @@ import { supabase } from './supabase';
 import {
   HandshakeAgreement,
   HandshakeClaim,
+  HandshakeFundingEvent,
   HandshakeCreateInput,
+  HandshakePassFailResult,
   HandshakeProgressEvent,
   HandshakeProgressSnapshot,
+  HandshakeRedemption,
   HandshakeStatus,
+  HandshakeTestSession,
   RewardConfig,
 } from '../types/handshake.types';
 import { createProgressSnapshot, resolveClaimOutcome } from './handshake.logic';
@@ -33,6 +37,31 @@ function toIsoDate(dateLike: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+const TASK_WORKING_STATUSES: HandshakeStatus[] = ['accepted', 'task_in_progress', 'awaiting_test_initiation'];
+const TERMINAL_STATUSES: HandshakeStatus[] = ['fulfilled', 'expired', 'cancelled'];
+
+function normalizeLegacyStatus(status: HandshakeStatus): HandshakeStatus {
+  if (status === 'pending') return 'pending_acceptance';
+  if (status === 'active') return 'task_in_progress';
+  if (status === 'completed') return 'awaiting_test_initiation';
+  if (status === 'claimable') return 'approved_for_claim';
+  return status;
+}
+
+export function getHandshakeBlockerReason(handshake: HandshakeAgreement): string | null {
+  if (handshake.status === 'cancelled') return 'Handshake was cancelled by parent.';
+  if (handshake.status === 'expired') return 'Handshake expired before completion.';
+  if (handshake.funding_status !== 'funded') return 'Funding is required before child acceptance.';
+  if (!handshake.accepted_at && !handshake.child_accepted_at) return 'Child must accept the handshake first.';
+  if (handshake.status === 'awaiting_test_initiation') return 'Parent must initiate testing.';
+  if (handshake.status === 'testing_in_progress') return 'Testing is still in progress.';
+  if (handshake.status === 'scored_failed') return 'Most recent test failed. Parent can require a retake.';
+  if (handshake.status === 'retake_required') return 'Retake required before redemption review.';
+  if (handshake.status === 'awaiting_parent_redemption_review') return 'Awaiting parent redemption decision.';
+  if (handshake.status === 'redemption_rejected') return 'Parent rejected redemption.';
+  return null;
 }
 
 function calculatePercent(value: number, target: number): number {
@@ -245,9 +274,10 @@ async function evaluateHybridGoal(handshake: HandshakeAgreement): Promise<Handsh
   const effectiveStartDate = dateWindowDays > 0
     ? toIsoDate(new Date(Date.now() - dateWindowDays * 24 * 60 * 60 * 1000).toISOString())
     : handshake.start_date;
+  const endDate = handshake.due_date ?? handshake.end_date;
 
   if (typeof config?.minActivityCount === 'number') {
-    const questCount = await countCompletedQuests(handshake.student_id, effectiveStartDate, handshake.end_date);
+    const questCount = await countCompletedQuests(handshake.student_id, effectiveStartDate, endDate);
     checks.push({
       required: true,
       passed: questCount >= config.minActivityCount,
@@ -261,7 +291,7 @@ async function evaluateHybridGoal(handshake: HandshakeAgreement): Promise<Handsh
       handshake.id,
       'pronunciation_score',
       effectiveStartDate,
-      handshake.end_date
+      endDate
     );
     checks.push({
       required: true,
@@ -272,7 +302,7 @@ async function evaluateHybridGoal(handshake: HandshakeAgreement): Promise<Handsh
   }
 
   if (typeof config?.improvementThreshold === 'number') {
-    const confidenceSeries = await getConfidenceSeries(handshake.id, effectiveStartDate, handshake.end_date);
+    const confidenceSeries = await getConfidenceSeries(handshake.id, effectiveStartDate, endDate);
     const improvement = confidenceSeries.length >= 2
       ? confidenceSeries[confidenceSeries.length - 1].value - confidenceSeries[0].value
       : 0;
@@ -302,7 +332,7 @@ async function evaluateHybridGoal(handshake: HandshakeAgreement): Promise<Handsh
 
 async function evaluateByChallengeType(handshake: HandshakeAgreement): Promise<HandshakeProgressSnapshot> {
   const startDate = handshake.start_date;
-  const endDate = handshake.end_date;
+  const endDate = handshake.due_date ?? handshake.end_date;
   const target = toNumber(handshake.target_value);
 
   switch (handshake.challenge_type) {
@@ -387,17 +417,26 @@ export async function createHandshake(parentId: string, payload: HandshakeCreate
       title: payload.title,
       description: payload.description ?? null,
       challenge_type: payload.challengeType,
+      task_type: payload.taskType ?? payload.challengeType,
       target_metric: payload.targetMetric,
+      target_config: payload.targetConfig ?? {},
       target_value: payload.targetValue,
       min_result_value: payload.minResultValue ?? null,
+      minimum_score_required: payload.minimumScoreRequired ?? payload.minResultValue ?? payload.targetValue,
       reward_type: payload.rewardType,
+      reward_label: payload.rewardLabel ?? payload.rewardDescription,
       reward_description: payload.rewardDescription,
       reward_value: payload.rewardValue ?? null,
       reward_config: payload.rewardConfig ?? {},
+      funding_status: 'not_funded',
       verification_type: payload.verificationType ?? 'automatic',
       start_date: payload.startDate,
+      due_date: payload.dueDate ?? payload.endDate,
       end_date: payload.endDate,
-      status: 'pending',
+      status: 'initiated',
+      allow_retake: payload.allowRetake ?? true,
+      max_retakes: payload.maxRetakes ?? 1,
+      notes: payload.notes ?? null,
       progress_value: 0,
     })
     .select('*')
@@ -414,9 +453,82 @@ export async function createHandshake(parentId: string, payload: HandshakeCreate
     eventType: 'handshake_created',
     message: 'Parent created a new handshake challenge.',
     metadata: {
+      status: 'initiated',
       challengeType: data.challenge_type,
       rewardType: data.reward_type,
       targetValue: data.target_value,
+    },
+  });
+
+  return data as HandshakeAgreement;
+}
+
+export async function initiateHandshake(parentId: string, payload: HandshakeCreateInput): Promise<HandshakeAgreement> {
+  return createHandshake(parentId, payload);
+}
+
+export async function fundHandshake(input: {
+  parentId: string;
+  handshakeId: string;
+  fundingType: string;
+  amount: number;
+  metadata?: Record<string, unknown>;
+}): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+
+  if (handshake.parent_id !== input.parentId) {
+    throw new Error('Only the parent owner can fund this handshake.');
+  }
+
+  const normalized = normalizeLegacyStatus(handshake.status);
+  if (!['initiated', 'draft', 'funded', 'pending_acceptance'].includes(normalized)) {
+    throw new Error('Funding can only be completed before child acceptance.');
+  }
+
+  const now = nowIso();
+  const amount = toNumber(input.amount, 0);
+  if (amount <= 0) {
+    throw new Error('Funding amount must be greater than zero.');
+  }
+
+  const { error: eventError } = await supabase.from('handshake_funding_events').insert({
+    handshake_id: handshake.id,
+    parent_id: input.parentId,
+    funding_type: input.fundingType,
+    amount,
+    status: 'completed',
+    metadata: input.metadata ?? {},
+  });
+
+  if (eventError) {
+    throw new Error(`Failed to record funding event: ${eventError.message}`);
+  }
+
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({
+      funding_status: 'funded',
+      funded_at: now,
+      status: 'pending_acceptance',
+      updated_at: now,
+    })
+    .eq('id', handshake.id)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to update funded handshake.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId: data.id,
+    studentId: data.student_id,
+    actorId: input.parentId,
+    eventType: 'handshake_funded',
+    message: 'Parent funded the handshake and sent it for child acceptance.',
+    metadata: {
+      fundingType: input.fundingType,
+      amount,
     },
   });
 
@@ -430,7 +542,13 @@ export async function acceptHandshake(studentId: string, handshakeId: string): P
     throw new Error('Only the assigned child can accept this handshake.');
   }
 
-  if (handshake.status !== 'pending') {
+  const normalized = normalizeLegacyStatus(handshake.status);
+
+  if (handshake.funding_status !== 'funded') {
+    throw new Error('Handshake must be funded before acceptance.');
+  }
+
+  if (normalized !== 'pending_acceptance') {
     return handshake;
   }
 
@@ -439,8 +557,9 @@ export async function acceptHandshake(studentId: string, handshakeId: string): P
   const { data, error } = await supabase
     .from('handshake_agreements')
     .update({
-      status: 'active',
+      status: 'accepted',
       child_accepted_at: now,
+      accepted_at: now,
       updated_at: now,
     })
     .eq('id', handshakeId)
@@ -456,7 +575,7 @@ export async function acceptHandshake(studentId: string, handshakeId: string): P
     studentId: data.student_id,
     actorId: studentId,
     eventType: 'handshake_accepted',
-    message: 'Student accepted the handshake challenge.',
+    message: 'Child accepted the handshake challenge.',
   });
 
   await evaluateHandshakeProgress(handshakeId);
@@ -523,17 +642,323 @@ export async function getHandshakeActivityLog(handshakeId: string) {
   return data ?? [];
 }
 
+export async function trackHandshakeTaskProgress(input: {
+  handshakeId: string;
+  childId: string;
+  eventType: string;
+  metricValue: number;
+  sourceType: string;
+  sourceId?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+  if (handshake.student_id !== input.childId) {
+    throw new Error('Only the assigned child can submit handshake progress.');
+  }
+
+  const normalized = normalizeLegacyStatus(handshake.status);
+  if (!TASK_WORKING_STATUSES.includes(normalized)) {
+    throw new Error('Handshake is not in a task progress state.');
+  }
+
+  await recordHandshakeProgressEvent({
+    handshakeId: input.handshakeId,
+    studentId: input.childId,
+    eventType: input.eventType,
+    metricValue: input.metricValue,
+    sourceType: input.sourceType,
+    sourceId: input.sourceId,
+    metadata: input.metadata,
+  });
+
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({ status: 'task_in_progress', updated_at: nowIso() })
+    .eq('id', input.handshakeId)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to update task progress state.');
+  }
+
+  return evaluateHandshakeProgress(input.handshakeId);
+}
+
+export async function initiateHandshakeTest(input: {
+  parentId: string;
+  handshakeId: string;
+  testType: string;
+}): Promise<HandshakeTestSession> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+
+  if (handshake.parent_id !== input.parentId) {
+    throw new Error('Only the parent owner can initiate handshake testing.');
+  }
+
+  const normalized = normalizeLegacyStatus(handshake.status);
+  if (!['accepted', 'task_in_progress', 'awaiting_test_initiation'].includes(normalized)) {
+    throw new Error('Child must accept and progress task before testing starts.');
+  }
+
+  const now = nowIso();
+
+  const { data: updatedHandshake, error: updateError } = await supabase
+    .from('handshake_agreements')
+    .update({
+      status: 'testing_in_progress',
+      testing_started_at: now,
+      updated_at: now,
+    })
+    .eq('id', handshake.id)
+    .select('*')
+    .single();
+
+  if (updateError || !updatedHandshake) {
+    throw new Error(updateError?.message ?? 'Failed to move handshake to testing state.');
+  }
+
+  const { data, error } = await supabase
+    .from('handshake_test_sessions')
+    .insert({
+      handshake_id: handshake.id,
+      child_id: handshake.student_id,
+      initiated_by_parent_id: input.parentId,
+      test_type: input.testType,
+      status: 'in_progress',
+    })
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to create handshake test session.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId: handshake.id,
+    studentId: handshake.student_id,
+    actorId: input.parentId,
+    eventType: 'handshake_test_initiated',
+    message: 'Parent initiated handshake knowledge testing.',
+    metadata: { testType: input.testType },
+  });
+
+  return data as HandshakeTestSession;
+}
+
+export async function scoreHandshakeTest(input: {
+  handshakeId: string;
+  sessionId: string;
+  scoreValue: number;
+  analysisPayload?: Record<string, unknown>;
+}): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+  const now = nowIso();
+  const scoreValue = toNumber(input.scoreValue, 0);
+  const minScore = toNumber(
+    handshake.minimum_score_required ?? handshake.min_result_value ?? handshake.target_value,
+    0
+  );
+  const passed = scoreValue >= minScore;
+  const passFailResult: HandshakePassFailResult = passed ? 'passed' : 'failed';
+
+  const { error: sessionError } = await supabase
+    .from('handshake_test_sessions')
+    .update({
+      completed_at: now,
+      score_value: scoreValue,
+      pass_fail_result: passFailResult,
+      analysis_payload: input.analysisPayload ?? {},
+      status: 'completed',
+      updated_at: now,
+    })
+    .eq('id', input.sessionId)
+    .eq('handshake_id', input.handshakeId);
+
+  if (sessionError) {
+    throw new Error(`Failed to update handshake test session: ${sessionError.message}`);
+  }
+
+  const nextStatus: HandshakeStatus = passed
+    ? 'awaiting_parent_redemption_review'
+    : (handshake.allow_retake && handshake.retake_count < handshake.max_retakes ? 'retake_required' : 'scored_failed');
+
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({
+      status: nextStatus,
+      scored_at: now,
+      score_value: scoreValue,
+      pass_fail_result: passFailResult,
+      retake_count: passed ? handshake.retake_count : handshake.retake_count + 1,
+      updated_at: now,
+    })
+    .eq('id', input.handshakeId)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to update handshake score result.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId: data.id,
+    studentId: data.student_id,
+    eventType: 'handshake_test_scored',
+    message: passed ? 'Child passed the handshake knowledge test.' : 'Child did not pass the handshake knowledge test.',
+    metadata: {
+      scoreValue,
+      minimumRequired: minScore,
+      passFailResult,
+      nextStatus,
+    },
+  });
+
+  return data as HandshakeAgreement;
+}
+
+export async function reviewHandshakeRedemption(handshakeId: string): Promise<{
+  handshake: HandshakeAgreement;
+  redemption: HandshakeRedemption | null;
+}> {
+  const [handshake, redemption] = await Promise.all([
+    getHandshakeOrThrow(handshakeId),
+    getHandshakeRedemption(handshakeId),
+  ]);
+  return { handshake, redemption };
+}
+
+export async function approveHandshakeRedemption(input: {
+  parentId: string;
+  handshakeId: string;
+  notes?: string;
+}): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+  if (handshake.parent_id !== input.parentId) {
+    throw new Error('Only the parent owner can approve redemption.');
+  }
+
+  if (!['awaiting_parent_redemption_review', 'scored_passed', 'approved_for_claim'].includes(normalizeLegacyStatus(handshake.status))) {
+    throw new Error('Handshake is not ready for redemption approval.');
+  }
+
+  const now = nowIso();
+  const { error: redemptionError } = await supabase.from('handshake_redemptions').upsert(
+    {
+      handshake_id: handshake.id,
+      child_id: handshake.student_id,
+      status: 'approved',
+      requested_at: now,
+      approved_at: now,
+      notes: input.notes ?? null,
+      updated_at: now,
+    },
+    { onConflict: 'handshake_id' }
+  );
+
+  if (redemptionError) {
+    throw new Error(`Failed to update handshake redemption: ${redemptionError.message}`);
+  }
+
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({
+      status: 'approved_for_claim',
+      parent_redemption_decision: 'approved',
+      approved_for_claim_at: now,
+      updated_at: now,
+    })
+    .eq('id', handshake.id)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to approve handshake redemption.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId: data.id,
+    studentId: data.student_id,
+    actorId: input.parentId,
+    eventType: 'handshake_redemption_approved',
+    message: 'Parent approved child redemption.',
+  });
+
+  return data as HandshakeAgreement;
+}
+
+export async function rejectHandshakeRedemption(input: {
+  parentId: string;
+  handshakeId: string;
+  requireRetake?: boolean;
+  notes?: string;
+}): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(input.handshakeId);
+  if (handshake.parent_id !== input.parentId) {
+    throw new Error('Only the parent owner can reject redemption.');
+  }
+
+  const now = nowIso();
+  const nextStatus: HandshakeStatus = input.requireRetake ? 'retake_required' : 'redemption_rejected';
+  const decision = input.requireRetake ? 'retake_required' : 'rejected';
+
+  const { error: redemptionError } = await supabase.from('handshake_redemptions').upsert(
+    {
+      handshake_id: handshake.id,
+      child_id: handshake.student_id,
+      status: 'rejected',
+      requested_at: now,
+      rejected_at: now,
+      notes: input.notes ?? null,
+      updated_at: now,
+    },
+    { onConflict: 'handshake_id' }
+  );
+
+  if (redemptionError) {
+    throw new Error(`Failed to update handshake redemption: ${redemptionError.message}`);
+  }
+
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({
+      status: nextStatus,
+      parent_redemption_decision: decision,
+      updated_at: now,
+    })
+    .eq('id', handshake.id)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to reject handshake redemption.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId: data.id,
+    studentId: data.student_id,
+    actorId: input.parentId,
+    eventType: input.requireRetake ? 'handshake_retake_required' : 'handshake_redemption_rejected',
+    message: input.requireRetake ? 'Parent requested a retake before redemption.' : 'Parent rejected redemption request.',
+    metadata: { notes: input.notes ?? null },
+  });
+
+  return data as HandshakeAgreement;
+}
+
 export async function evaluateHandshakeProgress(handshakeId: string): Promise<HandshakeAgreement> {
   const handshake = await getHandshakeOrThrow(handshakeId);
 
-  if (handshake.status === 'cancelled' || handshake.status === 'fulfilled' || handshake.status === 'claimed') {
+  const normalizedStatus = normalizeLegacyStatus(handshake.status);
+
+  if (TERMINAL_STATUSES.includes(normalizedStatus) || normalizedStatus === 'claimed') {
     return handshake;
   }
 
-  if (new Date(handshake.end_date) < new Date(toIsoDate(new Date().toISOString()))) {
+  if (new Date(handshake.due_date ?? handshake.end_date) < new Date(toIsoDate(new Date().toISOString()))) {
     const { data, error } = await supabase
       .from('handshake_agreements')
-      .update({ status: 'expired', updated_at: nowIso() })
+      .update({ status: 'expired', expired_at: nowIso(), updated_at: nowIso() })
       .eq('id', handshakeId)
       .select('*')
       .single();
@@ -547,18 +972,19 @@ export async function evaluateHandshakeProgress(handshakeId: string): Promise<Ha
 
   const snapshot = await evaluateByChallengeType(handshake);
   const now = nowIso();
+  const acceptedAt = handshake.accepted_at ?? handshake.child_accepted_at;
   const updates: Record<string, unknown> = {
     progress_value: snapshot.value,
     progress_percent: snapshot.percent,
     updated_at: now,
   };
 
-  if (snapshot.completed && handshake.status !== 'claimable') {
-    updates.status = 'claimable';
+  if (snapshot.completed && TASK_WORKING_STATUSES.includes(normalizedStatus)) {
+    updates.status = 'awaiting_test_initiation';
+    updates.task_completed_at = handshake.task_completed_at ?? now;
     updates.completed_at = handshake.completed_at ?? now;
-    updates.claimable_at = handshake.claimable_at ?? now;
-  } else if (!snapshot.completed && handshake.status === 'pending' && handshake.child_accepted_at) {
-    updates.status = 'active';
+  } else if (!snapshot.completed && acceptedAt && TASK_WORKING_STATUSES.includes(normalizedStatus)) {
+    updates.status = 'task_in_progress';
   }
 
   const { data, error } = await supabase
@@ -586,12 +1012,12 @@ export async function evaluateHandshakeProgress(handshakeId: string): Promise<Ha
     },
   });
 
-  if (String(data.status) === 'claimable' && handshake.status !== 'claimable') {
+  if (String(data.status) === 'awaiting_test_initiation' && normalizedStatus !== 'awaiting_test_initiation') {
     await logHandshakeEvent({
       handshakeId: handshake.id,
       studentId: handshake.student_id,
-      eventType: 'handshake_claimable',
-      message: 'Handshake target met and reward became claimable.',
+      eventType: 'handshake_task_completed',
+      message: 'Handshake task target met and is awaiting parent test initiation.',
       metadata: {
         progressValue: snapshot.value,
         targetValue: snapshot.target,
@@ -608,7 +1034,7 @@ export async function evaluateAllActiveHandshakesForStudent(studentId: string): 
     .from('handshake_agreements')
     .select('id')
     .eq('student_id', studentId)
-    .in('status', ['active', 'pending', 'completed']);
+    .in('status', ['accepted', 'task_in_progress', 'awaiting_test_initiation', 'active', 'pending', 'completed']);
 
   if (error) {
     throw new Error(`Failed to load active handshakes for evaluation: ${error.message}`);
@@ -631,7 +1057,9 @@ export async function markHandshakeClaimable(handshakeId: string): Promise<Hands
   const { data, error } = await supabase
     .from('handshake_agreements')
     .update({
-      status: 'claimable',
+      status: 'approved_for_claim',
+      parent_redemption_decision: 'approved',
+      approved_for_claim_at: now,
       completed_at: now,
       claimable_at: now,
       updated_at: now,
@@ -647,8 +1075,8 @@ export async function markHandshakeClaimable(handshakeId: string): Promise<Hands
   await logHandshakeEvent({
     handshakeId: data.id,
     studentId: data.student_id,
-    eventType: 'handshake_claimable',
-    message: 'Handshake moved to claimable.',
+    eventType: 'handshake_redemption_approved',
+    message: 'Handshake approved for claim.',
   });
 
   return data as HandshakeAgreement;
@@ -757,19 +1185,26 @@ async function grantDigitalRewards(handshake: HandshakeAgreement): Promise<void>
 
 export async function claimHandshakeReward(studentId: string, handshakeId: string): Promise<HandshakeAgreement> {
   const handshake = await getHandshakeOrThrow(handshakeId);
+  const normalized = normalizeLegacyStatus(handshake.status);
 
   if (handshake.student_id !== studentId) {
     throw new Error('Only the assigned child can claim this reward.');
   }
 
-  if (handshake.status === 'expired' || handshake.status === 'cancelled') {
+  if (normalized === 'expired' || normalized === 'cancelled') {
     throw new Error('This handshake can no longer be claimed.');
   }
 
-  const evaluated = await evaluateHandshakeProgress(handshakeId);
+  const blockerReason = getHandshakeBlockerReason(handshake);
+  if (blockerReason && normalized !== 'approved_for_claim') {
+    throw new Error(blockerReason);
+  }
 
-  if (evaluated.status !== 'claimable' && evaluated.status !== 'completed') {
-    throw new Error('Reward is not claimable yet.');
+  const evaluated = await evaluateHandshakeProgress(handshakeId);
+  const evaluatedStatus = normalizeLegacyStatus(evaluated.status);
+
+  if (evaluatedStatus !== 'approved_for_claim') {
+    throw new Error('Parent approval is required before claim.');
   }
 
   const now = nowIso();
@@ -790,6 +1225,24 @@ export async function claimHandshakeReward(studentId: string, handshakeId: strin
 
   if (claimError) {
     throw new Error(`Failed to create claim record: ${claimError.message}`);
+  }
+
+  const { error: redemptionError } = await supabase.from('handshake_redemptions').upsert(
+    {
+      handshake_id: evaluated.id,
+      child_id: studentId,
+      status: outcome.requiresParentFulfillment ? 'claimed' : 'fulfilled',
+      requested_at: evaluated.approved_for_claim_at ?? now,
+      approved_at: evaluated.approved_for_claim_at ?? now,
+      claimed_at: now,
+      fulfilled_at: outcome.requiresParentFulfillment ? null : now,
+      updated_at: now,
+    },
+    { onConflict: 'handshake_id' }
+  );
+
+  if (redemptionError) {
+    throw new Error(`Failed to update redemption record: ${redemptionError.message}`);
   }
 
   const updates: Record<string, unknown> = {
@@ -832,12 +1285,13 @@ export async function claimHandshakeReward(studentId: string, handshakeId: strin
 
 export async function confirmHandshakeFulfillment(parentId: string, handshakeId: string, notes?: string): Promise<HandshakeAgreement> {
   const handshake = await getHandshakeOrThrow(handshakeId);
+  const normalized = normalizeLegacyStatus(handshake.status);
 
   if (handshake.parent_id !== parentId) {
     throw new Error('Only the parent owner can confirm fulfillment.');
   }
 
-  if (handshake.status !== 'claimed') {
+  if (normalized !== 'claimed') {
     throw new Error('Handshake is not awaiting parent fulfillment.');
   }
 
@@ -855,6 +1309,20 @@ export async function confirmHandshakeFulfillment(parentId: string, handshakeId:
 
   if (claimError) {
     throw new Error(`Failed to update claim record: ${claimError.message}`);
+  }
+
+  const { error: redemptionError } = await supabase
+    .from('handshake_redemptions')
+    .update({
+      status: 'fulfilled',
+      fulfilled_at: now,
+      notes: notes ?? null,
+      updated_at: now,
+    })
+    .eq('handshake_id', handshakeId);
+
+  if (redemptionError) {
+    throw new Error(`Failed to update redemption record: ${redemptionError.message}`);
   }
 
   const { data, error } = await supabase
@@ -898,6 +1366,48 @@ export async function getHandshakeClaim(handshakeId: string): Promise<HandshakeC
   return (data as HandshakeClaim | null) ?? null;
 }
 
+export async function getHandshakeRedemption(handshakeId: string): Promise<HandshakeRedemption | null> {
+  const { data, error } = await supabase
+    .from('handshake_redemptions')
+    .select('*')
+    .eq('handshake_id', handshakeId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to fetch handshake redemption: ${error.message}`);
+  }
+
+  return (data as HandshakeRedemption | null) ?? null;
+}
+
+export async function getHandshakeFundingEvents(handshakeId: string): Promise<HandshakeFundingEvent[]> {
+  const { data, error } = await supabase
+    .from('handshake_funding_events')
+    .select('*')
+    .eq('handshake_id', handshakeId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch handshake funding events: ${error.message}`);
+  }
+
+  return (data ?? []) as HandshakeFundingEvent[];
+}
+
+export async function getHandshakeTestSessions(handshakeId: string): Promise<HandshakeTestSession[]> {
+  const { data, error } = await supabase
+    .from('handshake_test_sessions')
+    .select('*')
+    .eq('handshake_id', handshakeId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch handshake test sessions: ${error.message}`);
+  }
+
+  return (data ?? []) as HandshakeTestSession[];
+}
+
 export async function expireOverdueHandshakes(): Promise<number> {
   const { data, error } = await supabase.rpc('expire_overdue_handshakes');
 
@@ -936,4 +1446,47 @@ export async function recordHandshakeProgressEvent(input: {
   }
 
   return data as HandshakeProgressEvent;
+}
+
+export async function cancelHandshake(parentId: string, handshakeId: string, notes?: string): Promise<HandshakeAgreement> {
+  const handshake = await getHandshakeOrThrow(handshakeId);
+  if (handshake.parent_id !== parentId) {
+    throw new Error('Only the parent owner can cancel this handshake.');
+  }
+
+  const normalized = normalizeLegacyStatus(handshake.status);
+  if (['fulfilled', 'claimed', 'cancelled', 'expired'].includes(normalized)) {
+    throw new Error('Handshake cannot be cancelled in its current state.');
+  }
+
+  const now = nowIso();
+  const { data, error } = await supabase
+    .from('handshake_agreements')
+    .update({ status: 'cancelled', cancelled_at: now, notes: notes ?? handshake.notes, updated_at: now })
+    .eq('id', handshakeId)
+    .select('*')
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? 'Failed to cancel handshake.');
+  }
+
+  await logHandshakeEvent({
+    handshakeId,
+    studentId: handshake.student_id,
+    actorId: parentId,
+    eventType: 'handshake_cancelled',
+    message: 'Parent cancelled the handshake.',
+    metadata: { notes: notes ?? null },
+  });
+
+  return data as HandshakeAgreement;
+}
+
+export async function requestHandshakeRetake(parentId: string, handshakeId: string, notes?: string): Promise<HandshakeAgreement> {
+  return rejectHandshakeRedemption({ parentId, handshakeId, requireRetake: true, notes });
+}
+
+export async function expireStaleHandshakes(): Promise<number> {
+  return expireOverdueHandshakes();
 }

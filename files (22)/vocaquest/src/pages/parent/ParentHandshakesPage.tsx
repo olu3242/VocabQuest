@@ -53,7 +53,23 @@ const DEFAULT_FORM = {
   endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
 };
 
-const FILTERS: Array<'all' | HandshakeStatus> = ['all', 'pending', 'active', 'claimable', 'fulfilled', 'expired'];
+const WORKFLOW_FILTERS: Array<'all' | HandshakeStatus> = [
+  'all',
+  'initiated',
+  'pending_acceptance',
+  'accepted',
+  'task_in_progress',
+  'awaiting_test_initiation',
+  'testing_in_progress',
+  'awaiting_parent_redemption_review',
+  'approved_for_claim',
+  'claimed',
+  'fulfilled',
+  'retake_required',
+  'redemption_rejected',
+  'expired',
+  'cancelled',
+];
 
 interface ChildOption {
   id: string;
@@ -332,7 +348,7 @@ export default function ParentHandshakesPage() {
         )}
 
         <div className="flex flex-wrap gap-2">
-          {FILTERS.map((status) => (
+          {WORKFLOW_FILTERS.map((status) => (
             <button
               key={status}
               onClick={() => setFilter(status)}
@@ -353,7 +369,8 @@ export default function ParentHandshakesPage() {
           )}
 
           {visibleHandshakes.map((item) => {
-            const daysLeft = Math.max(0, Math.ceil((new Date(item.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+            const dueDate = item.due_date ?? item.end_date;
+            const daysLeft = Math.max(0, Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
 
             return (
               <button
@@ -370,6 +387,7 @@ export default function ParentHandshakesPage() {
                 <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-500">
                   <span>Challenge: {item.challenge_type.replace(/_/g, ' ')}</span>
                   <span>Reward: {item.reward_type.replace(/_/g, ' ')}</span>
+                  <span>Funding: {item.funding_status}</span>
                   <span>{daysLeft} day(s) left</span>
                 </div>
               </button>

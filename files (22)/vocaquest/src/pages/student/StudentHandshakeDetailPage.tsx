@@ -8,6 +8,7 @@ import {
   acceptHandshake,
   claimHandshakeReward,
   evaluateHandshakeProgress,
+  getHandshakeBlockerReason,
   getHandshakeById,
   getHandshakeClaim,
   getHandshakeProgressEvents,
@@ -57,7 +58,13 @@ export default function StudentHandshakeDetailPage() {
 
   const daysLeft = useMemo(() => {
     if (!handshake) return 0;
-    return Math.max(0, Math.ceil((new Date(handshake.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+    const dueDate = handshake.due_date ?? handshake.end_date;
+    return Math.max(0, Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+  }, [handshake]);
+
+  const blockerReason = useMemo(() => {
+    if (!handshake) return null;
+    return getHandshakeBlockerReason(handshake);
   }, [handshake]);
 
   const onAccept = async () => {
@@ -115,16 +122,20 @@ export default function StudentHandshakeDetailPage() {
               <p>Challenge: {handshake.challenge_type.replace(/_/g, ' ')}</p>
               <p>Target metric: {handshake.target_metric}</p>
               <p>Reward: {handshake.reward_description}</p>
+              <p>Funding: {handshake.funding_status}</p>
               <p>Claim status: {claimStatus}</p>
               <p>Tracked progress events: {eventCount}</p>
               <p>Days left: {daysLeft}</p>
             </div>
+            {blockerReason && handshake.status !== 'approved_for_claim' && (
+              <p className="mt-3 text-xs text-amber-700">Blocked: {blockerReason}</p>
+            )}
           </div>
 
           <div className="mt-5 flex flex-wrap gap-2">
-            {handshake.status === 'pending' && <Button onClick={() => void onAccept()}>Accept Handshake</Button>}
-            {handshake.status === 'claimable' && <Button variant="xp" onClick={() => void onClaim()}>Claim Reward</Button>}
-            {(handshake.status === 'active' || handshake.status === 'pending') && (
+            {handshake.status === 'pending_acceptance' && <Button onClick={() => void onAccept()}>Accept Handshake</Button>}
+            {handshake.status === 'approved_for_claim' && <Button variant="xp" onClick={() => void onClaim()}>Claim Reward</Button>}
+            {['accepted', 'task_in_progress', 'awaiting_test_initiation', 'testing_in_progress', 'retake_required'].includes(handshake.status) && (
               <Button variant="secondary" onClick={() => void load()}>Refresh Progress</Button>
             )}
           </div>

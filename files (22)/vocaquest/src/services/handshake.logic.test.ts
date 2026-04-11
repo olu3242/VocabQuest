@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canAcceptHandshake,
+  canClaimReward,
+  canInitiateParentTest,
   createProgressSnapshot,
+  determinePassFail,
+  isHandshakeFunded,
   resolveClaimOutcome,
   SUPPORTED_HANDSHAKE_CHALLENGES,
 } from './handshake.logic';
@@ -59,5 +64,31 @@ describe('handshake.logic', () => {
     expect(mixed.nextStatus).toBe('claimed');
     expect(mixed.claimStatus).toBe('submitted');
     expect(mixed.parentConfirmedAt).toBeNull();
+  });
+
+  it('enforces funding before acceptance', () => {
+    expect(isHandshakeFunded('funded')).toBe(true);
+    expect(isHandshakeFunded('not_funded')).toBe(false);
+    expect(canAcceptHandshake('pending_acceptance', 'funded')).toBe(true);
+    expect(canAcceptHandshake('pending_acceptance', 'not_funded')).toBe(false);
+  });
+
+  it('only allows parent test initiation after acceptance flow starts', () => {
+    expect(canInitiateParentTest('accepted')).toBe(true);
+    expect(canInitiateParentTest('task_in_progress')).toBe(true);
+    expect(canInitiateParentTest('awaiting_test_initiation')).toBe(true);
+    expect(canInitiateParentTest('initiated')).toBe(false);
+  });
+
+  it('computes pass fail from score threshold', () => {
+    expect(determinePassFail(88, 80)).toBe('passed');
+    expect(determinePassFail(79.9, 80)).toBe('failed');
+  });
+
+  it('blocks early claim before approval', () => {
+    expect(canClaimReward('approved_for_claim')).toBe(true);
+    expect(canClaimReward('claimable')).toBe(true);
+    expect(canClaimReward('awaiting_parent_redemption_review')).toBe(false);
+    expect(canClaimReward('testing_in_progress')).toBe(false);
   });
 });

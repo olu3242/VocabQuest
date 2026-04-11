@@ -1,4 +1,9 @@
-import type { HandshakeRewardType, RewardConfig } from '../types/handshake.types';
+import type {
+  HandshakeFundingStatus,
+  HandshakeRewardType,
+  HandshakeStatus,
+  RewardConfig,
+} from '../types/handshake.types';
 
 export const SUPPORTED_HANDSHAKE_CHALLENGES = [
   'quest_completion',
@@ -37,4 +42,26 @@ export function resolveClaimOutcome(
     claimStatus: requiresParentFulfillment ? 'submitted' : 'fulfilled',
     parentConfirmedAt: requiresParentFulfillment ? null : claimedAt,
   } as const;
+}
+
+export function isHandshakeFunded(fundingStatus: HandshakeFundingStatus) {
+  return fundingStatus === 'funded';
+}
+
+export function canAcceptHandshake(status: HandshakeStatus, fundingStatus: HandshakeFundingStatus) {
+  const eligibleStatuses: HandshakeStatus[] = ['pending_acceptance', 'pending'];
+  return eligibleStatuses.includes(status) && isHandshakeFunded(fundingStatus);
+}
+
+export function canInitiateParentTest(status: HandshakeStatus) {
+  const allowed: HandshakeStatus[] = ['accepted', 'task_in_progress', 'awaiting_test_initiation', 'active', 'completed'];
+  return allowed.includes(status);
+}
+
+export function determinePassFail(scoreValue: number, minimumRequired: number) {
+  return scoreValue >= minimumRequired ? 'passed' : 'failed';
+}
+
+export function canClaimReward(status: HandshakeStatus) {
+  return status === 'approved_for_claim' || status === 'claimable';
 }

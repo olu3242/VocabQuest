@@ -8,13 +8,28 @@ import {
   acceptHandshake,
   claimHandshakeReward,
   evaluateAllActiveHandshakesForStudent,
+  getHandshakeBlockerReason,
   getStudentHandshakes,
 } from '../../services/handshake.service';
 import type { HandshakeAgreement, HandshakeStatus } from '../../types/handshake.types';
 import { ROUTES } from '../../constants/routes.constants';
 import { useUIStore } from '../../store/uiStore';
 
-const FILTERS: Array<'all' | HandshakeStatus> = ['all', 'pending', 'active', 'claimable', 'fulfilled', 'expired'];
+const FILTERS: Array<'all' | HandshakeStatus> = [
+  'all',
+  'pending_acceptance',
+  'accepted',
+  'task_in_progress',
+  'awaiting_test_initiation',
+  'testing_in_progress',
+  'awaiting_parent_redemption_review',
+  'approved_for_claim',
+  'retake_required',
+  'claimed',
+  'fulfilled',
+  'expired',
+  'cancelled',
+];
 
 export default function StudentHandshakeHubPage() {
   const navigate = useNavigate();
@@ -33,7 +48,7 @@ export default function StudentHandshakeHubPage() {
     try {
       await evaluateAllActiveHandshakesForStudent(studentId);
       const rows = await getStudentHandshakes(studentId);
-      const becameClaimable = rows.find((item) => item.status === 'claimable');
+      const becameClaimable = rows.find((item) => item.status === 'approved_for_claim');
       if (becameClaimable) {
         setCelebration(becameClaimable);
       }
@@ -119,7 +134,9 @@ export default function StudentHandshakeHubPage() {
         )}
 
         {visible.map((item) => {
-          const daysLeft = Math.max(0, Math.ceil((new Date(item.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+          const dueDate = item.due_date ?? item.end_date;
+          const daysLeft = Math.max(0, Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+          const blockerReason = getHandshakeBlockerReason(item);
           return (
             <div key={item.id} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-card">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -130,13 +147,16 @@ export default function StudentHandshakeHubPage() {
               <p className="mb-3 text-sm text-gray-500">{item.description || 'Learning challenge agreement'}</p>
               <HandshakeProgressBar value={Number(item.progress_value)} target={Number(item.target_value)} />
               <p className="mt-2 text-xs text-gray-500">{daysLeft} day(s) left · Reward: {item.reward_description}</p>
+              {blockerReason && item.status !== 'approved_for_claim' && (
+                <p className="mt-1 text-xs text-amber-700">Blocked: {blockerReason}</p>
+              )}
 
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button variant="ghost" onClick={() => navigate(ROUTES.STUDENT_HANDSHAKE_DETAIL(item.id))}>View Details</Button>
-                {item.status === 'pending' && (
+                {item.status === 'pending_acceptance' && (
                   <Button onClick={() => void onAccept(item.id)}>Accept Handshake</Button>
                 )}
-                {item.status === 'claimable' && (
+                {item.status === 'approved_for_claim' && (
                   <Button variant="xp" onClick={() => void onClaim(item.id)}>Claim Reward</Button>
                 )}
               </div>
